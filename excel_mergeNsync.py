@@ -23,6 +23,37 @@ ws_m = wb_m[SHEET]
 ws_i = wb_i[SHEET]
 
 
+
+### logging
+LOG_SHEET = "MERGE_LOG"
+
+if LOG_SHEET not in wb_m.sheetnames:
+    ws_log = wb_m.create_sheet(LOG_SHEET)
+    ws_log.append([
+        "Timestamp",
+        "Action",
+        "Key",
+        "CheckNo",
+        "RefNo",
+        "Reason",
+        "IncomingRow"
+    ])
+else:
+    ws_log = wb_m[LOG_SHEET]
+
+def log(action, key="", check_no="", ref_no="", reason="", row=""):
+    ws_log.append([
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        action,
+        key,
+        check_no,
+        ref_no,
+        reason,
+        row
+    ])
+
+
+### sanitation
 def clean_text(value):
     if not value:
         return ""
@@ -70,40 +101,102 @@ def resolve_key(ws, row):
 
     return None
 
+
 # Build master index
 master_index = {}
+dv_index = {}
+
 for r in range(2, ws_m.max_row + 1):
     key = resolve_key(ws_m, r)
-    if key:
-        master_index[key] = r
+    if not key:
+        continue
 
-# Track incoming duplicates too
+    master_index[key] = r
+
+    if key.startswith("DV:"):
+        dv_base = key.split("|SIG:")[0]
+        dv_index.setdefault(dv_base, []).append(key)
+
 incoming_seen = set()
 
-added = updated = skipped = dup_incoming = 0
+added = updated = skipped = dup_incoming = dv_conflict = 0
 
 for r in range(2, ws_i.max_row + 1):
     key = resolve_key(ws_i, r)
 
+    check_no = ws_i[f"B{r}"].value
+    ref_no   = ws_i[f"C{r}"].value
+
     if not key:
         skipped += 1
+        log(
+            "SKIPPED_NO_KEY",
+            "",
+            check_no,
+            ref_no,
+            "Missing CheckNo and RefNo",
+            r
+        )
         continue
 
-    # Skip duplicates inside daily_extract itself
     if key in incoming_seen:
         dup_incoming += 1
+        log(
+            "DUP_INCOMING",
+            key,
+            check_no,
+            ref_no,
+            "Duplicate inside incoming file",
+            r
+        )
         continue
     incoming_seen.add(key)
+
+    # DV conflict detection
+    if key.startswith("DV:"):
+        dv_base = key.split("|SIG:")[0]
+        if dv_base in dv_index and key not in dv_index[dv_base]:
+            dv_conflict += 1
+            log(
+                "DV_CONFLICT",
+                key,
+                check_no,
+                ref_no,
+                "Same DV number with different content signature",
+                r
+            )
+            continue
 
     if key in master_index:
         target = master_index[key]
         for col in UPDATE_COLS:
             ws_m[f"{col}{target}"].value = ws_i[f"{col}{r}"].value
+
         updated += 1
+        log(
+            "UPDATED",
+            key,
+            check_no,
+            ref_no,
+            "Matched existing record",
+            r
+        )
     else:
         ws_m.append([ws_i[f"{c}{r}"].value for c in UPDATE_COLS] + [""])
-        master_index[key] = ws_m.max_row  # 🔥 critical line
+        master_index[key] = ws_m.max_row
+
+        if key.startswith("DV:"):
+            dv_index.setdefault(key.split("|SIG:")[0], []).append(key)
+
         added += 1
+        log(
+            "ADDED",
+            key,
+            check_no,
+            ref_no,
+            "New record appended",
+            r
+        )
 
 wb_m.save(MASTER_FILE)
 
@@ -112,3 +205,4 @@ print(f"Added: {added}")
 print(f"Updated: {updated}")
 print(f"Skipped (no key): {skipped}")
 print(f"Skipped (duplicate in incoming): {dup_incoming}")
+print(f"DV conflicts: {dv_conflict}")
