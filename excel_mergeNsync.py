@@ -1,6 +1,10 @@
 from openpyxl import load_workbook
 from datetime import datetime
 import shutil
+import re
+import hashlib
+from decimal import Decimal, InvalidOperation
+
 
 MASTER_FILE = "official.xlsx"
 INCOMING_FILE = "daily_extract.xlsx"
@@ -18,12 +22,52 @@ wb_i = load_workbook(INCOMING_FILE)
 ws_m = wb_m[SHEET]
 ws_i = wb_i[SHEET]
 
+
+def clean_text(value):
+    if not value:
+        return ""
+    text = str(value)
+    text = text.replace("\n", " ").replace("\r", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip().upper()
+
+def clean_number(value):
+    try:
+        return str(Decimal(str(value)).quantize(Decimal("0.01")))
+    except (InvalidOperation, TypeError):
+        return "0.00"
+
+def clean_date(value):
+    if not value:
+        return ""
+    try:
+        return value.strftime("%Y-%m-%d")
+    except AttributeError:
+        return str(value).strip()
+
+def sha256_signature(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
 def resolve_key(ws, row):
     check_no = ws[f"B{row}"].value
-    ref_no = ws[f"C{row}"].value
+    ref_no   = ws[f"C{row}"].value
 
+    # Strong key: Check + Ref
     if check_no and ref_no:
         return f"CHK:{str(check_no).strip()}|REF:{str(ref_no).strip()}"
+
+    # DV-only fallback with content signature
+    if ref_no:
+        date  = clean_date(ws[f"A{row}"].value)
+        desc  = clean_text(ws[f"E{row}"].value)
+        gross = clean_number(ws[f"F{row}"].value)
+        net   = clean_number(ws[f"G{row}"].value)
+
+        signature_base = f"{date}|{desc}|{gross}|{net}"
+        sig = sha256_signature(signature_base)
+
+        return f"DV:{str(ref_no).strip()}|SIG:{sig}"
+
     return None
 
 # Build master index
